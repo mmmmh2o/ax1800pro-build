@@ -111,14 +111,20 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
+          # feeds install 会在 package/feeds/<feed名>/ 下建软链。
+          # 据此判断：任何 feed（或源码树）已提供的包一律不拷。
+          # （不要用 `feeds list`：其输出不可靠，曾放过 luci-app-timecontrol）
           cd ..
           for p in $CANDIDATES; do
             if [ ! -d "kz-small/$p" ]; then
               echo "::warning::kz 中未找到 $p，跳过"
               continue
             fi
-            if (cd openwrt && ./scripts/feeds list 2>/dev/null | grep -qx "$p"); then
-              echo "skip $p (feed 已提供)"
+            if ls openwrt/package/feeds/*/"$p" >/dev/null 2>&1 \
+               || [ -d "openwrt/package/lean/$p" ] \
+               || [ -d "openwrt/package/emortal/$p" ] \
+               || [ -d "openwrt/package/qca-nss/$p" ]; then
+              echo "skip $p (feed/源码树已提供)"
             else
               cp -r "kz-small/$p" openwrt/package/custom/
               echo "picked $p"
