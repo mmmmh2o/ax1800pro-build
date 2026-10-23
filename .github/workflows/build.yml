@@ -136,6 +136,11 @@ jobs:
           if [ -f ua3f-src/openwrt/Makefile ]; then
             cp -r ua3f-src/openwrt openwrt/package/custom/ua3f
             echo "picked ua3f (official)"
+            # 上游 Makefile 的 Build/Prepare 从上级目录找 Go 源码，在
+            # package/custom/ 下必然失败；换成官方 v3.7.0 tarball 源码方案
+            # （PKG_HASH 为实测值，见 patches/ua3f-Makefile 头部说明）
+            cp patches/ua3f-Makefile openwrt/package/custom/ua3f/Makefile
+            echo "patched ua3f Makefile -> tarball source"
           fi
 
           # 撞名自检
@@ -228,6 +233,7 @@ jobs:
       - name: Diagnose failure (single-threaded re-run)
         if: failure()
         run: |
+          set -o pipefail
           cd openwrt
           make -j1 V=s 2>&1 | tail -400
 
