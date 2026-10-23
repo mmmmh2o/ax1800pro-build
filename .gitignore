@@ -1,0 +1,18 @@
+# 构建中间产物，不要提交
+openwrt/
+kz-small/
+*.resolved
+
+# 固件产物
+*.bin
+*.itb
+*.ubi
+*.img
+SHA256SUMS.txt
+
+# 本地备份（含密码/私钥/节点信息，绝对不要上传）
+backup*.tar.gz
+backup-*.tar.gz
+*.key
+*.pem
+*.crt

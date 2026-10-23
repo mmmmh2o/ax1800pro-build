@@ -1,0 +1,76 @@
+#!/bin/sh
+# ============================================================
+# 首次启动自动应用的配置（放进固件 openwrt/files/etc/uci-defaults/）
+# 作用: 刷完机第一次开机就是这个状态，不用再手工点一遍
+# 说明: 只需要写"你每次刷机都会改的那些"，不要照搬旧 /etc/config
+#       旧系统是 19.07 + fw3(iptables)，新系统是 fw4(nftables)，
+#       firewall/network 直接覆盖会起不来
+# ============================================================
+
+# ---------- 主机名与时区 ----------
+uci set system.@system[0].hostname='iStoreOS'
+uci set system.@system[0].timezone='CST-8'
+uci set system.@system[0].zonename='Asia/Shanghai'
+uci set system.@system[0].log_size='64'
+uci set system.@system[0].ttylogin='0'
+uci commit system
+
+# ---------- NTP（沿用你现在的列表）----------
+uci -q delete system.ntp.server
+uci add_list system.ntp.server='ntp.aliyun.com'
+uci add_list system.ntp.server='time1.cloud.tencent.com'
+uci add_list system.ntp.server='time.ustc.edu.cn'
+uci add_list system.ntp.server='cn.pool.ntp.org'
+uci set system.ntp.enabled='1'
+uci set system.ntp.enable_server='0'
+uci commit system
+
+# ---------- LAN 地址与 DHCP ----------
+# 你现网是 192.168.100.1/24，DHCP 100-250
+uci set network.lan.ipaddr='192.168.100.1'
+uci set network.lan.netmask='255.255.255.0'
+uci set network.lan.ip6assign='60'
+uci commit network
+
+uci set dhcp.lan.start='100'
+uci set dhcp.lan.limit='150'
+uci set dhcp.lan.leasetime='12h'
+uci set dhcp.lan.force='1'
+uci commit dhcp
+
+# ---------- LuCI ----------
+uci set luci.main.lang='zh_cn'
+uci set luci.main.mediaurlbase='/luci-static/argon'
+uci commit luci
+
+# ---------- 无线 ----------
+# 注意: 这里的 radio 名在新固件里是 radio0(5G)/radio1(2.4G)，
+# 与你旧系统的 wifi0/wifi1 命名不同，先按通用名写，
+# 刷完后用 `iwinfo` 核对实际频段再改。
+uci set wireless.radio0.disabled='0'
+uci set wireless.radio0.country='US'
+uci set wireless.radio0.channel='149'
+uci set wireless.radio0.htmode='HE80'
+uci set wireless.radio0.txpower='26'
+uci commit wireless
+
+uci set wireless.radio1.disabled='0'
+uci set wireless.radio1.country='US'
+uci set wireless.radio1.channel='1'
+uci set wireless.radio1.htmode='HE40'
+uci set wireless.radio1.txpower='26'
+uci commit wireless
+
+# ---------- CPU 调频 ----------
+uci set cpufreq.settings.governor='ondemand'
+uci set cpufreq.settings.minifreq='864000'
+uci set cpufreq.settings.maxfreq='1608000'
+uci commit cpufreq
+
+# ---------- 关掉不需要的默认服务 ----------
+# 注意: 不要停 odhcpd，LAN 的 IPv6(ra/dhcpv6) 靠它
+/etc/init.d/uhttpd enable 2>/dev/null
+/etc/init.d/dropbear enable 2>/dev/null
+/etc/init.d/firewall enable 2>/dev/null
+
+exit 0

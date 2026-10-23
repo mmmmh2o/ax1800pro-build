@@ -1,0 +1,251 @@
+name: Build AX1800 Pro firmware
+
+# 手动触发。两个预置：
+#   lean       -> coolsnowwolf/lede   (opkg + Lua LuCI + NSS 基础版, 内核 6.12)
+#   vikingyfy  -> VIKINGYFY/immortalwrt (apk + 内核 6.18 + NSS 全栈)
+# 源码仓库/分支输入框留默认即可，预置会自动带出对应仓库。
+on:
+  workflow_dispatch:
+    inputs:
+      preset:
+        description: '配置预置（lean=opkg+Lua LuCI；vikingyfy=apk+内核6.18+NSS全栈）'
+        type: choice
+        options: [lean, vikingyfy]
+        default: 'lean'
+      source_repo:
+        description: '源码仓库（留空=使用预置自带的仓库）'
+        required: false
+        default: ''
+      source_branch:
+        description: '分支（留空=使用预置自带的分支）'
+        required: false
+        default: ''
+      use_ccache:
+        description: '启用 ccache（首次慢，后续快）'
+        type: boolean
+        default: true
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PRESET: ${{ github.event.inputs.preset || 'lean' }}
+  # 两个预置对应的源码树不同，手动触发时以输入框为准
+  SEED_FILE: configs/seed-${{ github.event.inputs.preset || 'lean' }}.config
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---------- 1. 腾磁盘 ----------
+      # runner 只有 ~14GB 可用，OpenWrt 全量要 25GB+，
+      # 不清盘必在编内核时报 No space left on device
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+                      /usr/local/lib/node_modules
+          sudo apt-get clean
+          sudo swapoff -a || true
+          df -h /
+
+      - name: Add swap
+        run: |
+          sudo fallocate -l 4G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=4096
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses-dev libssl-dev python3 python3-setuptools \
+            rsync swig unzip zlib1g-dev file wget ca-certificates ccache \
+            libelf-dev
+          df -h /
+
+      # ---------- 2. 拉源码 ----------
+      # 预置决定源码树：lean -> coolsnowwolf/lede，vikingyfy -> VIKINGYFY/immortalwrt
+      - name: Resolve source repo
+        run: |
+          case "$PRESET" in
+            lean)      echo "REPO=https://github.com/coolsnowwolf/lede.git"      >> "$GITHUB_ENV"
+                       echo "BRANCH=master"                                       >> "$GITHUB_ENV" ;;
+            vikingyfy) echo "REPO=https://github.com/VIKINGYFY/immortalwrt.git"  >> "$GITHUB_ENV"
+                       echo "BRANCH=main"                                         >> "$GITHUB_ENV" ;;
+            *) echo "::error::未知预置: $PRESET"; exit 1 ;;
+          esac
+          # 手动输入覆盖预置默认
+          [ -n "${{ github.event.inputs.source_repo }}" ] && echo "REPO=${{ github.event.inputs.source_repo }}" >> "$GITHUB_ENV" || true
+          [ -n "${{ github.event.inputs.source_branch }}" ] && echo "BRANCH=${{ github.event.inputs.source_branch }}" >> "$GITHUB_ENV" || true
+
+      - name: Clone source
+        run: |
+          git clone --depth=1 -b "$BRANCH" "$REPO" openwrt
+          cd openwrt
+          echo "HEAD: $(git log -1 --format='%h %s')"
+          echo "PRESET=$PRESET  REPO=$REPO  BRANCH=$BRANCH"
+
+      # ---------- 3. 挂第三方包 ----------
+      # 两个预置的源码树 feeds 不同，所以不硬编码拷贝清单：
+      # feeds 装完后，凡是 feed 里已有的包一律不拷（避免重名），
+      # 只把 feed 里没有的从 kenzok8 拷进 package/custom。
+      - name: Fetch extra packages
+        run: |
+          git clone --depth=1 https://github.com/kenzok8/small-package.git kz-small
+          mkdir -p openwrt/package/custom
+
+          # 候选清单：两个预置取并集，由 feeds list 过滤
+          CANDIDATES="msd_lite vlmcsd luci-app-wolplus luci-app-ddnsto ddnsto \
+                      luci-app-linkease luci-app-control-webrestriction luci-app-timecontrol"
+
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+          cd ..
+          for p in $CANDIDATES; do
+            if [ ! -d "kz-small/$p" ]; then
+              echo "::warning::kz 中未找到 $p，跳过"
+              continue
+            fi
+            if (cd openwrt && ./scripts/feeds list 2>/dev/null | grep -qx "$p"); then
+              echo "skip $p (feed 已提供)"
+            else
+              cp -r "kz-small/$p" openwrt/package/custom/
+              echo "picked $p"
+            fi
+          done
+
+          # UA3F 官方仓库自带 OpenWrt 包定义（小写 ua3f），任何 feed 都没有
+          git clone --depth=1 https://github.com/SunBK201/UA3F.git ua3f-src
+          if [ -f ua3f-src/openwrt/Makefile ]; then
+            cp -r ua3f-src/openwrt openwrt/package/custom/ua3f
+            echo "picked ua3f (official)"
+          fi
+
+          # 撞名自检
+          for d in openwrt/package/custom/*/; do
+            name=$(basename "$d")
+            for feed in openwrt/package/lean openwrt/package/feeds/luci openwrt/package/feeds/packages; do
+              if [ -d "$feed/$name" ]; then
+                echo "::error::包名冲突: $name 已存在于 $feed"
+                exit 1
+              fi
+            done
+          done
+          echo "custom packages: $(ls openwrt/package/custom)"
+
+      # ---------- 4. 注入自定义文件 ----------
+      - name: Inject custom files
+        run: |
+          if [ -d files ]; then
+            mkdir -p openwrt/files
+            cp -a files/. openwrt/files/
+            echo "custom files:"; find openwrt/files -type f | head -20
+          fi
+
+      # feeds 已在上一步 update+install（第三方包过滤依赖它）
+
+      # ---------- 5. 缓存 ----------
+      - name: Restore download cache
+        uses: actions/cache@v4
+        with:
+          path: openwrt/dl
+          key: dl-${{ env.PRESET }}-${{ hashFiles('configs/seed-lean.config', 'configs/seed-vikingyfy.config') }}
+          restore-keys: |
+            dl-${{ env.PRESET }}-
+
+      # OpenWrt 的 ccache 目录是 $(TOPDIR)/.ccache
+      # （rules.mk: CCACHE_DIR 默认 $(TOPDIR)/.ccache），不是 ~/.ccache
+      - name: Restore ccache
+        if: ${{ github.event.inputs.use_ccache != 'false' }}
+        uses: actions/cache@v4
+        with:
+          path: openwrt/.ccache
+          key: ccache-${{ env.PRESET }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ env.PRESET }}-
+
+      # ---------- 6. 应用配置 ----------
+      - name: Apply seed config
+        run: |
+          cd openwrt
+          cp "../${{ env.SEED_FILE }}" .config
+          echo 'CONFIG_CCACHE=y' >> .config
+          make defconfig
+          cp .config "../configs/.config.resolved.${{ env.PRESET }}"
+          echo "=== 关键配置 ==="
+          grep -E '^CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_|^CONFIG_TARGET_ROOTFS_INITRAMFS' .config
+
+      # ---------- 7. 校验 ----------
+      # kconfig 对不存在的符号是静默丢弃的，必须显式核对
+      - name: Verify config symbols
+        env:
+          PRESET: ${{ env.PRESET }}
+        run: bash scripts/verify-config.sh openwrt/.config "${{ env.SEED_FILE }}"
+
+      # ---------- 8. 下载 ----------
+      - name: Download packages
+        run: |
+          cd openwrt
+          make download -j8 || make download -j1 V=s
+          df -h /
+
+      # ---------- 9. 编译 ----------
+      # set -o pipefail: 否则管道让 tail 的退出码盖掉 make 的失败
+      - name: Compile
+        run: |
+          set -o pipefail
+          cd openwrt
+          make -j"$(nproc)" V=w 2>&1 | tail -300
+          ls -lh bin/targets/qualcommax/ipq60xx/
+
+      # ---------- 10. 产物校验 ----------
+      - name: Verify artifacts
+        run: |
+          cd openwrt/bin/targets/qualcommax/ipq60xx/
+          fail=0
+          initramfs=$(ls *jdcloud_re-ss-01*initramfs* 2>/dev/null | head -1)
+          sysupgrade=$(ls *jdcloud_re-ss-01*sysupgrade* 2>/dev/null | head -1)
+          [ -z "$initramfs" ] && { echo "::error::缺少 initramfs，首次刷机无法进行"; fail=1; }
+          [ -z "$sysupgrade" ] && { echo "::error::缺少 sysupgrade"; fail=1; }
+          if [ -n "$initramfs" ]; then
+            sz=$(stat -c%s "$initramfs")
+            [ "$sz" -lt 3000000 ] && { echo "::error::initramfs 仅 $sz 字节，疑似异常"; fail=1; }
+            echo "initramfs: $initramfs ($sz bytes)"
+          fi
+          [ -n "$sysupgrade" ] && echo "sysupgrade: $sysupgrade"
+          [ "$fail" -eq 0 ] || exit 1
+          sha256sum *jdcloud_re-ss-01* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: ax1800pro-${{ env.PRESET }}-${{ github.run_number }}
+          path: |
+            openwrt/bin/targets/qualcommax/ipq60xx/*jdcloud_re-ss-01*
+            openwrt/bin/targets/qualcommax/ipq60xx/SHA256SUMS.txt
+            configs/.config.resolved.*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ github.run_number }}
+          path: |
+            openwrt/logs/
+            openwrt/.config
+          if-no-files-found: ignore
+          retention-days: 7
