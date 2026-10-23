@@ -223,6 +223,14 @@ jobs:
           }
           ls -lh bin/targets/qualcommax/ipq60xx/
 
+      # 失败后单线程 V=s 增量重跑：并发日志会互相淹没，-j1 会直接在
+      # 失败的包上打印完整错误，同时会生成 openwrt/logs/ 供 artifact 收集
+      - name: Diagnose failure (single-threaded re-run)
+        if: failure()
+        run: |
+          cd openwrt
+          make -j1 V=s 2>&1 | tail -400
+
       # ---------- 10. 产物校验 ----------
       - name: Verify artifacts
         run: |
@@ -262,5 +270,4 @@ jobs:
             openwrt/build.log
             openwrt/logs/
             openwrt/.config
-          if-no-files-found: ignore
-          retention-days: 7
+          if-no-files-found: ignore          retention-days: 7
