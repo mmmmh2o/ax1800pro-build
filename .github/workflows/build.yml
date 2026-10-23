@@ -270,4 +270,5 @@ jobs:
             openwrt/build.log
             openwrt/logs/
             openwrt/.config
-          if-no-files-found: ignore          retention-days: 7
+          if-no-files-found: ignore
+          retention-days: 7
