@@ -208,11 +208,19 @@ jobs:
 
       # ---------- 9. 编译 ----------
       # set -o pipefail: 否则管道让 tail 的退出码盖掉 make 的失败
+      # 完整日志 tee 到 build.log：并发构建时 tail -300 会淹没真正的报错包，
+      # 失败时从 build.log 里 grep 出 make *** 错误行定位根因
       - name: Compile
         run: |
           set -o pipefail
           cd openwrt
-          make -j"$(nproc)" V=w 2>&1 | tail -300
+          make -j"$(nproc)" V=w 2>&1 | tee build.log | tail -300 || {
+            rc=$?
+            echo "::error::make 退出码 $rc，失败点如下"
+            echo "=== 失败点定位（make *** / Error） ==="
+            grep -n -E "make(\[[0-9]+\])?: \*\*\*|Error [0-9]+$|error:|Error:" build.log | tail -40
+            exit $rc
+          }
           ls -lh bin/targets/qualcommax/ipq60xx/
 
       # ---------- 10. 产物校验 ----------
@@ -251,6 +259,7 @@ jobs:
         with:
           name: logs-${{ github.run_number }}
           path: |
+            openwrt/build.log
             openwrt/logs/
             openwrt/.config
           if-no-files-found: ignore
