@@ -5,6 +5,15 @@ name: Build AX1800 Pro firmware
 #   vikingyfy  -> VIKINGYFY/immortalwrt (apk + 内核 6.18 + NSS 全栈)
 # 源码仓库/分支输入框留默认即可，预置会自动带出对应仓库。
 on:
+  # push 触发：本机 GitHub API 被墙时，走 SSH 推送即可自动开编
+  push:
+    branches: [main]
+    paths:
+      - 'configs/**'
+      - 'scripts/**'
+      - 'files/**'
+      - 'patches/**'
+      - '.github/workflows/build.yml'
   workflow_dispatch:
     inputs:
       preset:
@@ -24,6 +33,10 @@ on:
         description: '启用 ccache（首次慢，后续快）'
         type: boolean
         default: true
+
+# Release 发布需要写权限
+permissions:
+  contents: write
 
 concurrency:
   group: build-${{ github.ref }}
@@ -216,6 +229,7 @@ jobs:
       # 完整日志 tee 到 build.log：并发构建时 tail -300 会淹没真正的报错包，
       # 失败时从 build.log 里 grep 出 make *** 错误行定位根因
       - name: Compile
+        id: compile
         run: |
           set -o pipefail
           cd openwrt
@@ -278,3 +292,32 @@ jobs:
             openwrt/.config
           if-no-files-found: ignore
           retention-days: 7
+
+      # ---------- 自发布 Release ----------
+      # 本机 GitHub API 被墙时无法查询 Actions，也无法下载 artifact。
+      # 把结果（成功=固件 / 失败=诊断日志）发布成 Release，
+      # 配合公私仓库可见性即可通过国内镜像拉取，全程不依赖 API。
+      - name: Publish result as release
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          # 固定 tag：镜像下载 URL 恒定，无需知道 run 编号
+          TAG="build-latest-${{ env.PRESET }}"
+          mkdir -p /tmp/rel
+          if [ "${{ steps.compile.outcome }}" = "success" ]; then
+            cp openwrt/bin/targets/qualcommax/ipq60xx/*jdcloud_re-ss-01* /tmp/rel/ 2>/dev/null || true
+            cp openwrt/bin/targets/qualcommax/ipq60xx/SHA256SUMS.txt /tmp/rel/ 2>/dev/null || true
+            cp configs/.config.resolved* /tmp/rel/ 2>/dev/null || true
+            echo "编译成功 $(date -u +%FT%TZ) preset=${{ env.PRESET }}" > /tmp/rel/RESULT.txt
+            TITLE="固件构建成功 build-${{ github.run_number }}"
+          else
+            [ -f openwrt/build.log ] && tail -n 500 openwrt/build.log > /tmp/rel/build-fail.log
+            [ -f openwrt/.config ] && cp openwrt/.config /tmp/rel/failed.config
+            echo "编译失败 $(date -u +%FT%TZ) preset=${{ env.PRESET }}，详见 build-fail.log" > /tmp/rel/RESULT.txt
+            TITLE="构建失败报告 build-${{ github.run_number }}"
+          fi
+          ls -lh /tmp/rel/
+          gh release delete "$TAG" -y --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG" /tmp/rel/* --title "$TITLE" --notes "自动发布：preset=${{ env.PRESET }}，commit ${{ github.sha }}" --latest
