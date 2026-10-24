@@ -116,13 +116,17 @@ jobs:
           git clone --depth=1 https://github.com/kenzok8/small-package.git kz-small
           mkdir -p openwrt/package/custom
 
-          # 候选清单：两个预置取并集，由 feeds list 过滤
+          # 候选清单：两个预置取并集，由 feeds 软链过滤
+          # （用户已要求摘除第三方应用全家桶，改由 iStore 商店自装，候选仅作保底）
           CANDIDATES="msd_lite vlmcsd luci-app-wolplus luci-app-ddnsto ddnsto \
                       luci-app-linkease luci-app-control-webrestriction luci-app-timecontrol"
 
           cd openwrt
+          # iStore 应用商店（linkease 官方 feed，用户要求编译进去）
+          echo 'src-git istore https://github.com/linkease/istore;main' >> feeds.conf.default
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+          ./scripts/feeds install -d y -p istore luci-app-store || echo "::warning::iStore 安装失败，继续"
 
           # feeds install 会在 package/feeds/<feed名>/ 下建软链。
           # 据此判断：任何 feed（或源码树）已提供的包一律不拷。
