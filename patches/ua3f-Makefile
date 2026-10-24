@@ -6,12 +6,17 @@ PKG_RELEASE:=1
 
 # 相比上游 SunBK201/UA3F v3.7.0 的 openwrt/Makefile，仅两处修改：
 # 1) 启用官方 tarball 源码下载（上游注释掉了该方案且注释里的 PKG_HASH 有误，
-#    实测 codeload tar.gz/v3.7.0 的 SHA256 为下行值）
+#    实测 SHA256 为下行值；2026-10-24 复核 archive/refs/tags 与 codeload
+#    是同一 tarball，哈希一致）。
+#    URL 形式注意：OpenWrt 下载系统按 PKG_SOURCE_URL/PKG_SOURCE 拼接请求 URL，
+#    codeload 形如 .../tar.gz/v3.7.0 的 URL 后面不能再追加文件名（会 404，
+#    run 40040689099 即因此挂掉），故用 github archive/refs/tags + v$(PKG_VERSION).tar.gz
+#    （该 URL 302 跳转到 codeload 同一 tarball，实测哈希一致）。
 #    上游的 Build/Prepare 用 `$(CP) ../go.mod ...` 假设包目录位于源码树
 #    内部（openwrt/ 子目录旁边），在 package/custom/ 下必然失败；
 # 2) Build/Prepare 改为默认解包（Build/Prepare/Default）+ po2lmo。
-PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
-PKG_SOURCE_URL:=https://codeload.github.com/SunBK201/UA3F/tar.gz/v$(PKG_VERSION)
+PKG_SOURCE:=v$(PKG_VERSION).tar.gz
+PKG_SOURCE_URL:=https://github.com/SunBK201/UA3F/archive/refs/tags
 PKG_HASH:=744efcab526b06ca7852776ffcd2623453f560e575b1bad452b714e56413a4c4
 
 PKG_MAINTAINER:=SunBK201 <sunbk201gm@gmail.com>
